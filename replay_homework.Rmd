@@ -1,0 +1,513 @@
+ ---
+title: "Replay_homework"
+author: "Marci"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+load('./Achilles.RData')
+source("PlaceCellFunctions.R")
+require(viridis)
+## tha package Matrix implements an efficient representation of sparse matrices (most of the elements are 0)
+require(Matrix)
+pos <- rat$pos
+spt <- rat$spt
+dx <- 0.05 # cm, resolution 
+x.breaks <- seq(rat$MazeRange[1], rat$MazeRange[2], by=dx)
+x.mids <- round(x.breaks[-1] - dx/2, 3)
+act.runs.left <- cell.maps.runs(spt, pos, i.runs=rat$iruns.up, dx=0.05, MazeRange=rat$MazeRange, cell.IDs=rat$PyrIDs)
+act.runs.right <- cell.maps.runs(spt, pos, i.runs=rat$iruns.down, dx=0.05, MazeRange=rat$MazeRange, cell.IDs=rat$PyrIDs)
+```
+###########################################################
+left=up
+right=down
+##########################################################
+Applying smoothing over space on the data:
+```{r}
+act.runs.left.smoothed=array(0,dim=c(120,32,42))
+act.runs.right.smoothed=array(0,dim=c(120,32,42))
+library(smoother)
+for(cell in c(1:120)){
+    options(smoother.window=0.25,smoother.tails = TRUE)  
+    s=act.runs.left[cell,,]
+    s.s=array(0, dim = c(32,42))
+    s.d=act.runs.right[cell,,]
+    s.s.d=array(0, dim = c(32,42))
+    for(i in c(1:42)){
+      s.s[,i]=smth(s[,i])
+      s.s.d[,i]=smth(s.d[,i])
+    }
+    act.runs.left.smoothed[cell,,]=s.s
+    act.runs.right.smoothed[cell,,]=s.s.d
+}
+```
+##Section 1
+Calculate the ratemaps:
+```{r}
+
+ratemaps.left.t <- apply(act.runs.left.smoothed[1:120,,], c(1,2), sum)
+Tmap.left <- apply(act.runs.left[121,,], 1, sum)
+
+ratemaps.right.t <- apply(act.runs.right.smoothed[1:120,,], c(1,2), sum)
+Tmap.right <- apply(act.runs.right[121,,], 1, sum)
+
+ratemaps.left.all <- t(ratemaps.left.t) / Tmap.left
+ratemaps.right.all <- t(ratemaps.right.t) / Tmap.right
+i.cells.active.left <- which(apply(ratemaps.left.all, 2, max) > 5) 
+N.cells.active.left <- length(i.cells.active.left)
+
+i.cells.active.right <- which(apply(ratemaps.right.all, 2, max) > 5) 
+N.cells.active.right <- length(i.cells.active.right)
+
+
+i.cells.active <- which((apply(ratemaps.left.all, 2, max) > 5) | (apply(ratemaps.right.all, 2, max) > 5)) 
+N.cells.active <- length(i.cells.active)
+ratemaps.left <- ratemaps.left.all[,i.cells.active]
+ratemaps.right <- ratemaps.right.all[,i.cells.active]
+
+```
+
+## Homework 1
+
+* Calculate the distribution of correlations (`cor()`) among place fields in the two different running directions! Plot it on a histogram (`hist()`), and indicate its mean! [3 points]
+* As a control, shuffle the cells randomly, and calculate the correlations again. Calculate the mean of the shuffled distribution as well. [3 points]
+
+```{r, warning=FALSE}
+cov_m=rep(0,N.cells.active)
+for (cell in c(1:N.cells.active)){
+  s.up=ratemaps.left[,cell]
+  s.down=ratemaps.right[,cell]
+  cov_m[cell]=round(cor(s.up,s.down),2)
+}
+
+cov_m_sf=rep(0,N.cells.active)
+set.seed(2) #to make reproducible
+cell.shuffled=sample(1:N.cells.active)
+cell=0
+for (cell_sf in cell.shuffled){
+  cell=cell+1
+  if(cell_sf==cell){break}
+  s.up=ratemaps.left[,cell]
+  s.down=ratemaps.right[,cell_sf]
+  cov_m_sf[cell]=round(cor(s.up,s.down),2)
+ }
+
+hist(cov_m, col=rgb(0,0,1,1/4), main = 'compare with one random sample',breaks = 14,xlab = 'correlation', ylim=c(1,30))
+hist(cov_m_sf, add=T, col=rgb(1,0,1,1/4),breaks = 14)
+legend('topright', legend=c('experiement','random sample'),col=c(rgb(0,0,1,1/4),rgb(1,0,1,1/4)),pch=16, cex=0.9)
+mtext(side=1,line=4,paste('mean of the experiement:',round(mean(cov_m),2),'mean of the random sample:',round(mean(cov_m_sf),2)))
+```
+
+
+
+* Observe the two distributions. Are they similar or different? [1p] What does it tell you about the place representation in the two running directions? [1p] Could you decode the direction of motion from the cell's activity? Could you decode the position of the animal? (Now you don't need to decode either.) [2p]
+
+
+##Section 2
+We collect all spikes in a huge matrix with columns being the time points at 40 Hz resolution and rows being the active cells. We only focus on cells that are active during the left runs. We will detect candidate replay events by a transient increase in the population activity while the animal is immobile.
+
+```{r, cache=T, results='hide'}
+## collect all spikes in a big population activity matrix
+
+i1 <- 3001 # start a bit before the first run
+i2 <- 80000 # end after the last run
+isp.1 <- min(which(spt[,1] > pos[i1,1]))
+isp.2 <- max(which(spt[,1] < pos[i2,1]))
+# spt contains all spikes with two columns: time, cell ID
+# we select only points between 3001 and 80000
+spt.pop.all <- spt[isp.1:isp.2,] 
+
+# next we select the spikes of the cells active during left runs
+ii.act.pop <- spt.pop.all[,2] %in% rat$PyrIDs[i.cells.active.left] # index of cells active during the left runs
+spt.pop.IDs <- spt.pop.all[ii.act.pop,]
+
+# next we rename the cell IDs - 
+# recall, cells are named by the tetrodes they are recorded from
+# now we give them numbers from 1 to 50 or so.
+spt.pop <- spt.pop.IDs
+for (i.cell in 1:N.cells.active.left){
+	ii <- rat$PyrIDs[i.cells.active.left[i.cell]]
+	i.sp <- which(spt.pop.IDs[,2] == ii)
+	spt.pop[i.sp,2] <- i.cell
+}
+
+## time and position vectors for the population activity...
+tpop <- pos[i1:i2, 1]
+xpop <- pos[i1:i2, 2]
+xpop <- xpop - min(xpop)
+dt.pos <- mean(diff(tpop))
+
+## the population spike matrix - SPike Train POPulation
+## tha package Matrix implements an efficient representation of sparse matrices (most of the elements are 0)
+popact <- Matrix(0, N.cells.active, i2-i1+1)
+
+## for each active cell we find its spikes and add to the population activity matrix
+for (i.cell in 1:N.cells.active.left){
+	t.sp <- spt.pop[which(spt.pop[,2] == i.cell),1]
+	i.sp <- (t.sp - pos[i1,1]) %/% dt.pos
+	for (jj in i.sp) popact[i.cell,jj] <- popact[i.cell,jj] + 1
+	cat('cell', i.cell, 'done \n')
+}
+```
+
+Next, we will detect candidate events in the population activity. Replay events are short (~0.1 s) periods with increased population activity. They are typical during immobility. Here we detect them using a threshold for speed and total spike count in a 100 ms window.
+
+```{r}
+## total population activity - to detect candidate replay events
+poprate <- colSums(popact)
+sum(poprate)
+poprate.f <- filter(poprate, rep(1, 4))
+
+## speed of the animal 
+speed <- abs(diff(xpop))
+speed <- c(speed[1], speed)
+
+
+## candidate spw is where there are at least 40 spikes in 0.1 s and the rat is not moving
+## this is somewhat conservative, but will do for the present purposes
+ind.spw <- which((speed < 0.0005) & (poprate.f > 40))
+
+## some spw-s are detected more than once. Here we remove duplicates.
+ind.different.spw <- rep(T, length(ind.spw))
+for (ii in 2:length(ind.spw)){
+	if ((ind.spw[ii] - ind.spw[ii-1]) < 10) ind.different.spw[ii] <- F
+}
+ind.spw <- ind.spw[ind.different.spw]
+t.spw <- tpop[ind.spw]
+x.spw <- xpop[ind.spw]
+
+## finally we will need to sort the cells according to their peak of their place field.
+## this will be useful to detect order in the activity of the cells.
+ratemaps.left <- ratemaps.left.all[,i.cells.active.left]
+ii.maxs.left <- apply(ratemaps.left, 2, which.max)
+sort.peaks.left <- sort(ii.maxs.left, ind=T)$ix
+ratemaps.right<-ratemaps.right.all[,i.cells.active.right]
+ii.maxs.right <- apply(ratemaps.right, 2, which.max)
+sort.peaks.right <- sort(ii.maxs.right, ind=T)$ix
+```
+
+Finally, we will take a look on all candidate event. We will plot the activity of the cells in the function of time in a 0.5 s long window around the event. The cells are sorted and coloured according to the position of their place field, so their sequential activation should be observed in these plots as slant lines with either positive or negative slopes, depending on the direction of the replay (forward or backward). Here I selected 6 events,  but the plot can also be saved into a file `ReplayEvents.png`.
+
+Spikes are collected from the matrix `spt.pop` that contains all spikes of the active cells during the analysed session:
+
+* For each candidate event we select a 0.5 s long interval around the event. 
+* These define the start and the end of the event.
+* We find the corresponding spikes, stored in the vector `t.spw`.
+* Then we sort the cell according to their place field location.
+* Finally, we plot the cells' activities in each event.
+
+```{r}
+#png('ReplayEvents.png', 2500, 1800, pointsize=36)
+#par(mfcol=c(7,8)); par(mar=c(1,1,1,1))
+#for (i.spw in 1:length(ind.spw)){
+par(mfcol=c(2,3)); par(mar=c(4,3,1,1))
+ for (i.spw in c(5:10)){
+	t.start <- t.spw[i.spw] - 0.15
+	t.end <- t.spw[i.spw] + 0.35
+
+	isp.1 <- min(which(spt.pop[,1] > t.start))
+	isp.2 <- max(which(spt.pop[,1] < t.end))
+	spw <- spt.pop[isp.1:isp.2,]
+	
+	#Sort the cell according to their place field location.
+	cells <- spw[,2]
+	cells.left <- cells
+	# cells.right <- cells
+	cols.cells <- rep(0, length(cells))
+	for (i.sp in 1:length(cells)) {
+		cells.left[i.sp] <- which(sort.peaks.left == cells[i.sp])
+		# cells.right[i.sp] <- which(sort.peaks.right == cells[i.sp])
+		cols.cells[i.sp] <- rainbow(N.cells.active.left, end=0.7)[which(sort.peaks.left == cells[i.sp])]
+	}
+	
+	
+	# plot(spw[,1], cells.left, pch=16, col=4)
+	# abline(v=t.spw[i.spw], col=grey(0.75))
+	title <- paste('t:', round(t.spw[i.spw], 1), 'x:', round(x.spw[i.spw], 2))
+	plot(spw[,1], cells.left, pch=16, col=cols.cells, axes=T, main=title, xlim=c(t.start, t.end), ylim=c(0, 55),xlab='time',ylab='cell')
+	abline(v=t.spw[i.spw], col=grey(0.75))
+	box()
+#	readline(i.spw)	
+}
+# dev.off()
+```
+* Come up with a metric that can classify these events into three categories: forward, backward or unrelated. [3 points]
+The most obvious metric would be the slope of the fitted line to the datapoints. Depending on the magnitude and the sign of the slope we could decide whether it is a forward, backward or an unrelated event. Two things emerge for sure from this, one: what is the boundary of  between the unrelated and the back or forward event and two: should we exlclude the time period before and after the event and fit only to the points coming exclusively from the SWR event or not.  
+
+A tried 3 different fit methods each with only the 0.1 secundom of the SWR and with the additional 0.15 sec before the event, so totally 6 fitting. The histogram of the normalised arcus tangent of the slope values are shown in the .png file. The methods I've used are the following: linear regression with lm(), robust linear regression using an M estimator with rlm, and an other robust fit with line().
+
+
+
+
+```{r}
+#install.packages('MASS')
+require(MASS)
+png('ReplayEvents_linreg_signf.png', 2500, 1800, pointsize=36)
+par(mfcol=c(7,8)); par(mar=c(1,1,1,1))
+slope=numeric(length(ind.spw))
+event_pos=numeric(length(ind.spw))
+for (i.spw in 1:length(ind.spw)){
+# par(mfcol=c(2,3)); par(mar=c(4,3,1,1))
+# for (i.spw in c(15:20)){
+	t.start <- t.spw[i.spw]
+	t.end <- t.spw[i.spw] + 0.1
+  isp.1 <- min(which(spt.pop[,1] > t.start))
+	isp.2 <- max(which(spt.pop[,1] < t.end))
+	spw <- spt.pop[isp.1:isp.2,]
+	
+	
+	
+	#Sort the cell according to their place field location.
+	cells <- spw[,2]
+	cells.left <- cells
+	cols.cells <- rep(0, length(cells))
+	for (i.sp in 1:length(cells)) {
+		cells.left[i.sp] <- which(sort.peaks.left == cells[i.sp])
+		# cells.right[i.sp] <- which(sort.peaks.right == cells[i.sp])
+  	cols.cells[i.sp] <- rainbow(N.cells.active.left, end=0.7)[which(sort.peaks.left ==  cells[i.sp])]
+  	}
+  	
+  x=spw[,1]*100
+  y=cells.left
+  #fit=line(x,y)
+  fit=lm(y~x)
+  #intercept: tengelymetszet= 0.4
+  #a: meredekség (slope) =1.2
+  #plot(fit)
+  title2=paste('slope:',round(atan(fit$coefficients[2])/(pi/2),2))
+  plot(spw[,1], cells.left,pch=16, col=cols.cells, axes=F, main=title2, xlim=c(t.start-0.15, t.end+0.3), ylim=c(0, 55),xlab='time',ylab='cell')
+  abline(lm(y~spw[,1]))
+  #abline(coef(line(spw[,1],y)))
+  box()
+  #legend('topright',legend = c('ct p-value:',round(cor.test(x,y)$p.value,5)),bty = 'n')
+  if(cor.test(x,y)$p.value<0.05) legend('topright',legend ='*',cex = 2.5,bty='n')
+  slope[i.spw]<-round(atan(fit$coefficients[2])/(pi/2),2)
+  event_pos[i.spw]<-pos[abs(t.start-pos[,1])<0.01][2]
+}
+hist(slope,breaks = 30,xlim = c(-1,1), col = 2,main = (paste('slope mean:',round(mean(slope),2))))
+dev.off()
+```
+* Calculate this metric for the replay events shown above. Do you observe more forward or reverse events? [3 points]
+Let's say with the line fit method only for the event period, events with slope values smaller than -0.5 are backward, between -0.5 and 0.5 are unrealted and bigger than 0.5 are forward events. 
+```{r}
+N.forward=length(slope[which(slope>0.5)])
+N.backward=length(slope[which(slope<(-0.5))])
+N.unrelated=length(slope)-(N.forward+N.backward)
+paste('forward #:',N.forward)
+paste('backward #:',N.backward)
+
+```
+* Calculate the frequency of the different categories at the left and right end of the linear track. Does the frequency of the forward and backward events depend on the position of the animal? [4 points]
+
+```{r}
+cat('right end of the track:',round(min(pos[,2],na.rm = T),2),'\n')
+cat('left end of the track:',round(max(pos[,2],na.rm = T),2),'\n')
+cat('positon of the events:\n',event_pos=round(event_pos,2))
+
+```
+Now I separate the events that have happend on the left end or the right end of the track and calculate the calculate the freq. of the categories. 
+```{r}
+left_boundary=1.3
+rigt_boundary= -0.25
+sl_left=slope[event_pos>left_boundary]
+sl_right=slope[event_pos<rigt_boundary]
+paste('freq of left end forward',round(length(sl_left[which(sl_left>0.5)])/length(sl_left),2))
+paste('freq of left end reverse',round(length(sl_left[which(sl_left<(-0.5))])/length(sl_left),2))
+paste('freq of right end forward',round(length(sl_right[which(sl_right>0.5)])/length(sl_right),2))
+paste('freq of right end reverse',round(length(sl_right[which(sl_right<(-0.5))])/length(sl_right),2))
+
+
+```
+
+
+
+
+* Repeat the same analysis using neuronal activity pattern templates defined on the right runs. [4 points]
+##Right runs
+```{r}
+png('ReplayEvents_fitline_Right.png', 2500, 1800, pointsize=36)
+par(mfcol=c(7,8)); par(mar=c(1,1,1,1))
+slope=numeric(length(ind.spw))
+event_pos=numeric(length(ind.spw))
+for (i.spw in 1:length(ind.spw)){
+	t.start <- t.spw[i.spw]
+	t.end <- t.spw[i.spw] + 0.1
+  isp.1 <- min(which(spt.pop[,1] > t.start))
+	isp.2 <- max(which(spt.pop[,1] < t.end))
+	spw <- spt.pop[isp.1:isp.2,]
+	
+	#Sort the cell according to their place field location.
+	cells <- spw[,2]
+	cells.r <- cells
+	cols.cells <- rep(0, length(cells))
+	for (i.sp in 1:length(cells)) {
+		cells.r[i.sp] <- which(sort.peaks.right == cells[i.sp])
+  	cols.cells[i.sp] <- rainbow(N.cells.active.right, end=0.7)[which(sort.peaks.right ==  cells[i.sp])]
+  	}
+  	
+  x=spw[,1]*100
+  y=cells.r
+  #fit=line(x,y)
+  fit=lm(y~x)
+  #intercept: tengelymetszet= 0.4
+  #a: meredekség (slope) =1.2
+  #plot(fit)
+  title2=paste('slope:',round(atan(fit$coefficients[2])/(pi/2),2))
+  plot(spw[,1], cells.r,pch=16, col=cols.cells, axes=F, main=title2, xlim=c(t.start-0.15, t.end+0.3), ylim=c(0, 55),xlab='time',ylab='cell')
+  abline(lm(y~spw[,1]))
+  #abline(coef(line(spw[,1],y)))
+  box()
+  slope[i.spw]<-round(atan(fit$coefficients[2])/(pi/2),2)
+  event_pos[i.spw]<-pos[abs(t.start-pos[,1])<0.01][2]
+}
+hist(slope,breaks = 30,xlim = c(-1,1), col = 2,main = (paste('slope mean:',round(mean(slope),2))))
+dev.off()
+
+# N.forward=length(slope[which(slope>0.5)])
+# N.backward=length(slope[which(slope<(-0.5))])
+# N.unrelated=length(slope)-(N.forward+N.backward)
+# paste('forward #:',N.forward)
+# paste('backward #:',N.backward)
+# 
+# left_boundary=1.3
+# rigt_boundary= -0.25
+# sl_left=slope[event_pos>left_boundary]
+# sl_right=slope[event_pos<rigt_boundary]
+# paste('freq of left end forward',round(length(sl_left[which(sl_left>0.5)])/length(sl_left),2))
+# paste('freq of left end reverse',round(length(sl_left[which(sl_left<(-0.5))])/length(sl_left),2))
+# paste('freq of right end forward',round(length(sl_right[which(sl_right>0.5)])/length(sl_right),2))
+# paste('freq of right end reverse',round(length(sl_right[which(sl_right<(-0.5))])/length(sl_right),2))
+
+```
+
+* Now consider left and right runs together: you have 4 templates: left forward, left backward, right forward, right backward. This may cause two problems: 1) more template patterns increases the probability that a random pattern is found to be matched to one of the templates. 2) It is not easy to classify the events if the templates are similar. Considering these difficulties, classify the events into the corresponding 5 categories. [20 points]
+
+
+##PCA
+```{r}
+  i.spw=20
+	t.start <- t.spw[i.spw]
+	t.end <- t.spw[i.spw] + 0.1
+  isp.1 <- min(which(spt.pop[,1] > t.start))
+	isp.2 <- max(which(spt.pop[,1] < t.end))
+	spw <- spt.pop[isp.1:isp.2,]
+	
+	cells <- spw[,2]
+	cells.left <- cells
+	X=cbind(spw[,1],cells.left)
+	colnames(X)<-c('time','cells.left')
+	princ_comp=prcomp(X,scale. = T)#skalazast megcsinalja magatol
+#   names(princ_comp)
+#   princ_comp$rotation
+#   biplot(princ_comp,scale = 0)
+#   
+# std_dev <- princ_comp$sdev
+#  pr_var <- std_dev^2
+#  prop_varex <- pr_var/sum(pr_var)
+#   plot(prop_varex)
+  
+	cols.cells <- rep(0, length(cells))
+	for (i.sp in 1:length(cells)) {
+		cells.left[i.sp] <- which(sort.peaks.left == cells[i.sp])
+		# cells.right[i.sp] <- which(sort.peaks.right == cells[i.sp])
+  	cols.cells[i.sp] <- rainbow(N.cells.active.left, end=0.7)[which(sort.peaks.left ==  cells[i.sp])]
+  	}
+  	
+  title2=paste('')
+  spw[,1]=scale(spw[,1],center = T,scale = T)
+  cells.left<-scale(cells.left,center = T,scale = T)
+  X_n=cbind(spw[,1],cells.left)
+  
+  biplot(princ_comp,scale = 0)
+  plot(spw[,1], cells.left,pch=16, col=cols.cells, axes=T, main=title2,xlab='time',ylab='cell')
+ # princ_comp$rotation
+  ggbiplot::ggbiplot(princ_comp)
+
+```
+What we learned: PCA makes no sense if we use it to a 2 dimensional data, because after normalization the 2 eigenvector that it finds will allways be the 45 degree line. In this case to find the direction of the biggest variance we need Factor Analysis that is not sensible for outlires, thus we won't need normalization. Factor analysis is also a linear generative model with Gaussian-distributed hidden variables, but we restrict the covariance matrix of the observations to be diagonal and the state noise cov. to be identity.
+
+
+##Support Vector Regression
+```{r, eval=FALSE}
+ #install.packages('e1071')
+library(e1071)
+png('ReplayEvents_lin_reg_SVR.png', 2500, 1800, pointsize=36)
+par(mfcol=c(7,8)); par(mar=c(1,1,1,1))
+slope=numeric(length(ind.spw))
+for (i.spw in 1:length(ind.spw)){
+# par(mfcol=c(2,3)); par(mar=c(4,3,1,1))
+# for (i.spw in c(15:20)){
+	t.start <- t.spw[i.spw]
+	t.end <- t.spw[i.spw] + 0.1
+  isp.1 <- min(which(spt.pop[,1] > t.start))
+	isp.2 <- max(which(spt.pop[,1] < t.end))
+	spw <- spt.pop[isp.1:isp.2,]
+
+	
+	#Sort the cell according to their place field location.
+	cells <- spw[,2]
+	cells.left <- cells
+	cols.cells <- rep(0, length(cells))
+	for (i.sp in 1:length(cells)) {
+		cells.left[i.sp] <- which(sort.peaks.left == cells[i.sp])
+		# cells.right[i.sp] <- which(sort.peaks.right == cells[i.sp])
+  	cols.cells[i.sp] <- rainbow(N.cells.active.left, end=0.7)[which(sort.peaks.left ==  cells[i.sp])]
+  	}
+  	
+  x=spw[,1]*100
+  y=cells.left
+  dataset=cbind(x,y)
+  regressor=svm(y~x,type = 'eps-regression',
+                kernel = 'radial')
+ 
+ # title2=paste('slope:',round(atan(fit$coefficients[2])/(pi/2),2))
+  plot(spw[,1], cells.left, pch=16, col=cols.cells, axes=F, main=title2, xlim=c(t.start-0.15, t.end+0.3), ylim=c(0, 55),xlab='time',ylab='cell')
+  #abline(rlm(y~spw[,1]))
+  lines(spw[,1],predict(regressor, newdata = dataset), add=T)
+  box()
+  
+}
+#hist(slope,breaks = 30, col = 2,main = (paste('slope mean:',round(mean(slope),2))))
+
+dev.off()
+```
+
+
+
+```{r}
+for (i.spw in 1:length(ind.spw)){
+  png(filename = paste('pictures/scaled/ReplayEvents_scaled_right',i.spw,'.png'), 1500, 1500, pointsize=36)
+  t.start <- t.spw[i.spw]
+	t.end <- t.spw[i.spw] + 0.1
+  isp.1 <- min(which(spt.pop[,1] > t.start))
+	isp.2 <- max(which(spt.pop[,1] < t.end))
+	spw <- spt.pop[isp.1:isp.2,]
+	
+	#Sort the cell according to their place field location.
+	cells <- spw[,2]
+	#cells.left <- cells
+	cells.r<-cells
+	cols.cells <- rep(0, length(cells))
+	for (i.sp in 1:length(cells)) {
+		#cells.left[i.sp] <- which(sort.peaks.left == cells[i.sp])
+  	#cols.cells[i.sp] <- rainbow(N.cells.active.left, end=0.7)[which(sort.peaks.left ==  cells[i.sp])]
+  	cells.r[i.sp] <- which(sort.peaks.right == cells[i.sp])
+  	cols.cells[i.sp] <- rainbow(N.cells.active.right, end=0.7)[which(sort.peaks.right ==  cells[i.sp])]
+  	}
+  	
+  spw[,1]=scale(spw[,1],center = T,scale = T)
+  #cells.left<-scale(cells.left,center = T,scale = T)
+  cells.r<-scale(cells.r,center = T,scale = T)
+  plot(spw[,1], cells.r,pch=16, col=cols.cells, axes=F,xlab = '',ylab = '')
+  #plot(spw[,1], cells.left, pch=16, col=cols.cells, axes=FALSE, xlim=c(t.start-0.1, t.end+0.1), ylim=c(0, 55),xlab = '',ylab = '')
+  dev.off()
+}
+
+```
+
+

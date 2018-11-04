@@ -1,0 +1,471 @@
+---
+title: "placecel_reliability"
+author: "Marci"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Adatok betöltése:
+
+```{r}
+load('./Achilles.RData')
+source("PlaceCellFunctions.R")
+pos <- rat$pos
+spt <- rat$spt
+dx <- 0.05 # cm, resolution 
+x.breaks <- seq(rat$MazeRange[1], rat$MazeRange[2], by=dx)
+x.mids <- round(x.breaks[-1] - dx/2, 3)
+act.runs <- cell.maps.runs(spt, pos, i.runs=rat$iruns.up, 
+                           dx=0.05, MazeRange=rat$MazeRange, cell.IDs=rat$PyrIDs)
+ratemaps.t <- apply(act.runs[1:120,,], c(1,2), sum)
+Tmap <- apply(act.runs[121,,], 1, sum)
+ratemaps.all <- t(ratemaps.t) / Tmap
+
+act.runs.down <- cell.maps.runs(spt, pos, i.runs=rat$iruns.down, dx=0.05,  MazeRange=rat$MazeRange, cell.IDs=rat$PyrIDs)
+ratemaps.t.down <- apply(act.runs.down[1:120,,], c(1,2), sum)
+Tmap.down <- apply(act.runs.down[121,,], 1, sum)
+ratemaps.all.down <- t(ratemaps.t.down) / Tmap.down
+
+metric_all.down=numeric(120)
+for (i in c(1:120)){
+  maxrate_idx=which.max(ratemaps.all.down[,i])
+  num=data.frame(act.runs[i,maxrate_idx,])
+  metric_all.down[i]=round(sum(num==0)/42,3)
+}
+#print(metric_all.down)
+```
+
+A felfelé futásból 4-esével plotolok sejteket, hogy az ábráról a placefield-jüket meg tudjam állapítani, illetve, hogy megállapítsam, hogy melyik megbízható, nem megbízható sejt vagy van e egyéb csoport.
+```{r fig.height=10, fig.width=7, echo=FALSE}
+#png(filename = 'pcell_reilab1.png')
+library(corrplot)
+par(mfcol=c(2,2)); par(mar=c(4,4,4,4))
+cells=c(3,71,9,21) #plotolni kívánt sejtek
+for (i in cells){
+  image(x.mids, 1:42, act.runs[i,,] / act.runs[121,,], col=topo.colors(24), xlab='x position (m)', ylab='trial', main='', ylim=c(0, 42))
+  #dev.new(width=2, height=3)
+  lines(x.mids, ratemaps.all[,i],col=heat.colors(3)[2], lwd=2)
+  axis(4, c(0, 5, 10), c(0, 5, 10))
+  mtext('firing rate (Hz)', 4, 2, adj=0)
+  maxrate_idx=which.max(ratemaps.all[,i])
+  num=data.frame(act.runs[i,maxrate_idx,])
+  mtext(round(sum(num==0)/42,3))
+  mtext(paste(i,'-es sejt'),3,2)
+}
+#dev.off()
+```
+
+Látható, hogy a 9-as sejt a legmegbízhatóbb, a 2-eshez nem tudunk placef.-ed rendelni a 3,21 pedig kérdéses. A mérték amit én kitaláltam a megbízhatóság mérésére a következõ: megkeresem minden sejthez tartozo poziciot ahol a legelenkebben tuzelt a sejt, hisz ha van placefield-je, feltelezem, hogy ott lesz. Ehhez a pozicióhoz megszámolom hány olyan futás volt amikor nem tuzelt ott a sejt majd lenormálom az összes futásszámmal. Minél kisebb az így kapott szám annál megbízhatóbb az adott sejt, 0.1 alatt már nagyon jónak számít. Ez a mérték ugye nem veszi egyáltalán figyelembe, hogy ha volt tuzelés egy adott trial-ban akkor ott hány tüzelés volt, sok esetben 7-nél is több, ezt is figyelembe kéne venni szerintem. Az mértékeket az adott ábra tetején jelenítem meg.
+
+
+Mivel az eddigiekben használt mérték nem veszi számításba hogy egy sejt egy adott bin-ben 1-nél többet tüzelt e, binárisan tesz csak különbséget illetve globálisan nézve nem tesz különbséget példáúl két olyan sejt között melyek közül az egyiknek egy darab jól elkülönülõ pozícióhoz tartozó aktivitása van (pl: 9-es sejt), a másiknap pedig egynél több ilyen poziciohoz tartozo aktivitása van (pl: 21-es sejt). Ezen  probélmákat korrelációszámítással oldhatjuk meg. A fenti 4 sejt korrelációs mátrixa, melyek az adott sejt különbözõ futásokhoz tartozó spike-train-ek korrelációs koefficensét tartalmazzák:   
+
+```{r fig.height=10, fig.width=7, echo=FALSE}
+#png(filename = 'pcell_reilab2.png')
+par(mfcol=c(2,2)); par(mar=c(4,4,4,4))
+cells=c(3,5,9,21) #plotolni kívánt sejtek
+for (cell in cells){
+  s=act.runs[cell,,]
+  #cor(s)
+  cs = cor(s)
+  m=round(mean(cs[upper.tri(cs)]),2)
+  sd1=round(sd(cs[upper.tri(cs)]),2)
+  corrplot(cor(s),type = 'upper',tl.cex=0.8)
+  mtext(paste(cell,'-es sejt'),3,2,col = 'blue')
+  mtext(paste('átlag:',m,'szórás:',sd1),3)
+}
+#dev.off()
+```
+
+A fenti ábrák felett a korrelációs mátrix átlaga és szórása látható, ezt használjuk mostantól a megbízhatóság mértékének, minél nagyobb az átlag és minél kisebb a szórás annál megbízhatóbb a sejt. Problémát okoz, hogy a spike-train egy diszkrét sorozat, a pálya amin az állat halad valamekkora szélességû ablakokra van osztva és ezekhez az ablakokhoz van egy tüzelésszám hozzárendelve. Azt szeretnénk, hogy térben simítva legyenek a spike-trainek így csökkentve annak a valoszinuseget, hogy egy spike nem abba a térbeli ablakba került ahol ténylegesen keletkezett. Erre lineráis filterezést alkalmazunk, Gauss-ablakkal.
+```{r fig.height=10, fig.width=7, echo=FALSE}
+cell=71
+library(smoother)
+s=act.runs[cell,,]
+sz=array(0,dim=c(2,42))
+szz=array(0,dim=c(1,42))
+s=rbind(act.runs[cell,,],sz)
+s=rbind(szz,s)
+s.smoothed=array(0,dim=c(35,42))
+
+options(smoother.window = 0.1,smoother.tails = F)
+for(i in c(1:42)){
+  s.smoothed[,i]=smth(s[,i])
+  #ss.smoothed[,i]=s.smoothed[!is.na(s.smoothed[,i])]
+}
+s.smoothed=na.omit(s.smoothed)
+
+#Simított és simítatlan adat összehasonlítása:
+
+par(mfcol=c(2,2)); par(mar=c(4,4,4,4))
+image(x.mids, 1:42, act.runs[cell,,] / act.runs[121,,], col=topo.colors(24), xlab='x position (m)', ylab='trial', main='', ylim=c(0, 42))
+axis(4, c(0, 5, 10), c(0, 5, 10))
+mtext('firing rate (Hz)', 4, 2, adj=0)
+  cs = cor(act.runs[cell,,])
+  m=round(mean(cs[upper.tri(cs)]),2)
+  sd1=round(sd(cs[upper.tri(cs)]),2)
+mtext(paste(cell,'-es sejt simitatlan'),3,2)
+
+  cs = cor(s)
+  m=round(mean(cs[upper.tri(cs)]),2)
+  sd1=round(sd(cs[upper.tri(cs)]),2)
+  corrplot(cor(s),type = 'upper',tl.cex=0.8)
+  mtext(paste(cell,'-es sejt'),3,2,col = 'blue')
+  mtext(paste('átlag:',m,'szórás:',sd1),3)
+  
+image(x.mids, 1:42, s.smoothed / act.runs[121,,], col=topo.colors(24), xlab='x position (m)', ylab='trial', main='', ylim=c(0, 42))
+axis(4, c(0, 5, 10), c(0, 5, 10))
+mtext('firing rate (Hz)', 4, 2, adj=0)
+  cs = cor(s.smoothed)
+  m=round(mean(cs[upper.tri(cs)]),2)
+  sd1=round(sd(cs[upper.tri(cs)]),2)
+mtext(paste(cell,'es sejt simitott'),3,2)
+
+  cs = cor(s.smoothed)
+  m=round(mean(cs[upper.tri(cs)]),2)
+  sd1=round(sd(cs[upper.tri(cs)]),2)
+  corrplot(cor(s),type = 'upper',tl.cex=0.8)
+  mtext(paste(cell,'-es sejt'),3,2,col = 'blue')
+  mtext(paste('átlag:',m,'szórás:',sd1),3)
+
+```
+
+Látható, hogy a simítás hatására megnõ a korreláció mértéke. 0.6-0.7 fölötti simított átlaggal rendelkezõ sejtet megbízhatónak tekinthetünk.
+Filterezõ ablak szélességének változtatása, eddigiekben az alapbeállítás 0.1 volt:
+
+```{r fig.height=10, fig.width=7}
+par(mfcol=c(2,2)); par(mar=c(4,4,4,4))
+cell=71
+windowss=c(0.05,0.1,0.2,0.4)
+for(j in windowss){
+  options(smoother.window=j,smoother.tails = TRUE)  
+  s=act.runs[cell,,]
+  s.smoothed=array(0,dim=c(32,42))
+  
+  for(i in c(1:42)){
+    s.smoothed[,i]=smth(s[,i])
+    #ss.smoothed[,i]=s.smoothed[!is.na(s.smoothed[,i])]
+  }
+  #s.smoothed=na.omit(s.smoothed)
+  ratemaps.smth.t <- apply(s.smoothed, 1, sum)
+  ratemaps.smth <- t(ratemaps.smth.t) / Tmap.down
+
+  
+  image(x.mids, 1:42, s.smoothed / act.runs[121,,], col=topo.colors(24), xlab='x position (m)',    ylab='trial', main='', ylim=c(0, 42))
+  axis(4, c(0, 5, 10), c(0, 5, 10))
+  lines(x.mids, ratemaps.smth,col=heat.colors(3)[2], lwd=2)
+  mtext('firing rate (Hz)', 4, 2, adj=0)
+  cs = cor(s.smoothed)
+  m=round(mean(cs[upper.tri(cs)]),2)
+  sd1=round(sd(cs[upper.tri(cs)]),2)
+  #mtext(paste('átlag:',m,'szórás:',sd1),3)
+  #mtext(paste(cell,'es sejt',j,'ablakkal'),3,2)
+  
+}
+
+```
+A következõkben megpróbálom meghatározni, hogy melyik ablakméretválasztás lenne a legoptimálisabb.
+
+```{r, warning=FALSE,echo=FALSE}
+windowss=seq(0.1,0.5,0.05)
+n1=n1.5=n2=n2.5=n3=n3.5=n4=n4.5=n5=0
+n1b=n1.5b=n2b=n2.5b=n3b=n3.5b=n4b=n4.5b=n5b=0
+n1c=n1.5c=n2c=n2.5c=n3c=n3.5c=n4c=n4.5c=n5c=0
+error.v<-corrs.v<-numeric(9)
+szinek=rainbow(9)
+plot(0.5,0,xlim = c(0,0.8),ylim=c(0,60),xlab = 'correlation',ylab = 'error')
+abline(h=3,col=1,lty=2)
+axis(side =2,at=3)
+legend('topleft', legend = windowss,col = szinek, pch=16)
+for(cell in c(1:120)){
+  k=0
+  s=act.runs[cell,,]
+  for(j in windowss){
+    k=k+1
+    options(smoother.window=j,smoother.tails = TRUE)  
+    s.smoothed=array(0,dim=c(32,42))
+    
+    for(i in c(1:42)){
+      s.smoothed[,i]=smth(s[,i])
+      #ss.smoothed[,i]=s.smoothed[!is.na(s.smoothed[,i])]
+    }
+    ratemaps.smth.t <- apply(s.smoothed, 1, sum)
+    ratemaps.smth <- t(ratemaps.smth.t) / Tmap
+    error=(max(ratemaps.all[,cell])-max(ratemaps.smth))^2
+    error.v[k]=error
+    
+    cs = cor(s.smoothed)
+    m=round(mean(cs[upper.tri(cs)]),2)
+    if(k==1){diff=(m-0.2)}
+    corrs=m-diff
+    corrs.v[k]=m-diff
+    points(corrs,error,col=szinek[k], pch=16)
+  }
+  lines(corrs.v,error.v)
+  a=3
+  b=5
+  c=8
+    if(error.v[1]<a){n1=n1+1}
+    if(error.v[2]<a){n1.5=n1.5+1}
+    if(error.v[3]<a){n2=n2+1}
+    if(error.v[4]<a){n2.5=n2.5+1}
+    if(error.v[5]<a){n3=n3+1}
+    if(error.v[6]<a){n3.5=n3.5+1}
+    if(error.v[7]<a){n4=n4+1}
+    if(error.v[8]<a){n4.5=n4.5+1}
+    if(error.v[9]<a){n5=n5+1}
+vec=cbind(windowss,c(n1,n1.5,n2,n2.5,n3,n3.5,n4,n4.5,n5))
+
+    if(error.v[1]<b){n1b=n1b+1}
+    if(error.v[2]<b){n1.5b=n1.5b+1}
+    if(error.v[3]<b){n2b=n2b+1}
+    if(error.v[4]<b){n2.5b=n2.5b+1}
+    if(error.v[5]<b){n3b=n3b+1}
+    if(error.v[6]<b){n3.5b=n3.5b+1}
+    if(error.v[7]<b){n4b=n4b+1}
+    if(error.v[8]<b){n4.5b=n4.5b+1}
+    if(error.v[9]<b){n5b=n5b+1}
+vecb=cbind(windowss,c(n1b,n1.5b,n2b,n2.5b,n3b,n3.5b,n4b,n4.5b,n5b))
+
+    if(error.v[1]<c){n1c=n1c+1}
+    if(error.v[2]<c){n1.5c=n1.5c+1}
+    if(error.v[3]<c){n2c=n2c+1}
+    if(error.v[4]<c){n2.5c=n2.5c+1}
+    if(error.v[5]<c){n3c=n3c+1}
+    if(error.v[6]<c){n3.5c=n3.5c+1}
+    if(error.v[7]<c){n4c=n4c+1}
+    if(error.v[8]<c){n4.5c=n4.5c+1}
+    if(error.v[9]<c){n5c=n5c+1}
+vecc=cbind(windowss,c(n1c,n1.5c,n2c,n2.5c,n3c,n3.5c,n4c,n4.5c,n5c))
+}
+```
+
+A fenti ábrán megjelenítettem a 0.1 és 0.5 közötti ablakméretválasztások hatásást 0.05-ös lépésközökkel. Minden sejtre felrajzoltam a frekvenciafüggvény maximum értékének négyzetes hibáját az simított és a simítás nélküli eset között a korrelációk függvényében. A várakozás az hogy egy darabig növelve az ablakméretet a korreláció anélkül nõ, hogy a hibában jelentõs növekedés lenne, majd látni fogunk egy töréspontot ami fölötti ablakméretnél megugrik a hibának a nagysága, ekkor a töréspontbeli ablakméretet lesz érdemes választani. Ez az ábráról nem olvsasható le egyértelmûen, ezért további számításokat végzek a megfelelõ ablakméret eldöntésére. Megszámolom az egyes ablakméretekre, hogy a hiba hány sejt esetén lesz kisebb mint 3, 5 illetve 8 és ezeket együtt megjelenítem. Az az ablakméret lesz a nyerõ amelyiknél   
+
+
+```{r}
+plot(vec,xlab = 'windows width', ylab = 'number of elements in error')
+points(vecb,col=2)
+points(vecc,col=3)
+legend('topright',legend = c('smaller than 3','smaller than 5','smaller than 8'),col=c(1,2,3),pch = 1)
+```
+Látható, hogy a 0.25-ös szélességû ablak a könyökponton (törésponton) helyekedik el, ettõl jobbra és balra vannak a legnagyobb változások. Így mostantól 0.25-ös ablakú simítással fogunk dolgozni.
+
+
+
+##Irányfüggõség jellemzése
+A következõkben a lefele futással dolgoztam. 
+```{r}
+plot(0,xlim=c(0,50),ylim=c(0,50),xlab='up run mean spike count', ylab='down run mean spike count')
+for(cell in c(1:120)){
+  spc.up=sum(act.runs[cell,,])/42
+  spc.down=sum(act.runs.down[cell,,])/42
+  points(spc.up,spc.down)
+}
+abline(h=3,v=3,col=2)
+axis(side =1,at=3)
+axis(side =2,at=3)
+```
+Továbbiakban csak a 3-nál nagyobb átlagos tüzelésszámú sejtekkel fogok dolgozni, a többit elhagyom. Ezt azért teszem meg, mert amikor a fel és lefele futásokat akarom majd összehasonlítani akkor ezt a rátafüggvények korreláltatásával teszem meg. Nagy a korrelációs koeff.-nél erõsen egyezeik a két futás place-fieldje, tehát irányfüggetlenül kódolja a sejt a pozíciót, viszont olyan sejtekre is nagy korrelációs értéket fogunk kapni ahol szinte egyáltalán nincs is tüzelés, ezek nekünk jelen esetbe nem relevánsak.
+Aktív sejtek kiválasztása:
+```{r}
+act.runs.active<-act.runs
+act.runs.active.down<-act.runs.down
+for(cell in c(1:120)){
+  spc.up=sum(act.runs[cell,,])/42
+  if(spc.up<=3){act.runs.active[cell,,]<-NA}
+  spc.down=sum(act.runs.down[cell,,])/42
+  if(spc.down<=3){act.runs.active.down[cell,,]<-NA}
+}
+#act.runs.active <- act.runs.active[!is.na(act.runs.active)]
+#act.runs.active.down <- act.runs.active.down[!is.na(act.runs.active.down)]
+```
+
+ 
+
+Simított adatok létrehozása:
+```{r}
+#a=dim(act.runs.active)[1]
+#b=dim(act.runs.active.down)[1]
+s.smoothed.up=array(0,dim=c(120,32,42))
+s.smoothed.down=array(0,dim=c(120,32,42))
+for(cell in c(1:120)){
+    options(smoother.window=0.25,smoother.tails = TRUE)  
+    s=act.runs.active[cell,,]
+    s.s=array(0, dim = c(32,42))
+    s.d=act.runs.active.down[cell,,]
+    s.s.d=array(0, dim = c(32,42))
+    for(i in c(1:42)){
+      s.s[,i]=smth(s[,i])
+      s.s.d[,i]=smth(s.d[,i])
+    }
+    s.smoothed.up[cell,,]=s.s
+    s.smoothed.down[cell,,]=s.s.d
+  }
+  ratemaps.t.u <- apply(s.smoothed.up[1:120,,], c(1,2), sum)
+  ratemaps.all.smth.up <- t(ratemaps.t.u) / Tmap
+  ratemaps.t.d <- apply(s.smoothed.down[1:120,,], c(1,2), sum)
+  ratemaps.all.smth.down <- t(ratemaps.t.d) / Tmap.down
+```
+
+
+Az irányfüggõség jellemzése: 
+```{r, echo=FALSE,warning=FALSE,fig.height=6, fig.width=8}
+par(mfcol=c(2,2)); par(mar=c(4,4,4,4))
+cells=c(12,4,20,71)
+for (cell in cells){
+  s.up=ratemaps.all.smth.up[,cell]
+  s.down=ratemaps.all.smth.down[,cell]
+
+  plot(s.up,s.down,type='p',col='blue')
+  mtext(paste(cell,'-es sejt'),3,2,col = 'blue')
+  mtext(paste(round(cor(s.up,s.down),2)))
+}
+# for(i in c(1:120)){
+#     s.up=ratemaps.all.smth.up[,i]
+#   s.down=ratemaps.all.smth.down[,i]
+#   print(paste(i,round(cor(s.up,s.down),2)))
+#   
+# }
+```
+
+
+
+Az irányfüggõség eldöntésére felrajzoltam az egyes sejtekhez tartozó lefelefe futás frekvenciafüggvényét a felfelefutás fv.függvényéhez képest illetve kiszámoltam ezek egymáshoz viszonyított korrelációkat ami az ábrák fölött látható. Az ábrákat úgy kell értelmezni, hogy akkor fog egy sejt mindkét irányban nagyjából ugyan ott aktív lenni, ha a minél több pont van az origó közelében és az átló felsõ részén. Ez azt jelenti, hogy ahol az egyik sejt csöndben volt ott a másik is és ahol élénken tüzelt ott a másik is. 
+Példák: 4 és 71-es irányfüggetlen, 12 és 20-as irányfüggõ.
+
+```{r, echo=FALSE}
+cell=71
+par(mfcol=c(1,2)); par(mar=c(4,4,4,4))
+image(x.mids, 1:42, s.smoothed.up[cell,,] / act.runs[121,,], col=topo.colors(24), xlab='x position (m)', ylab='trial', main='', ylim=c(0, 42))
+lines(x.mids, ratemaps.all.smth.up[,cell],col=heat.colors(3)[2], lwd=2)
+axis(4, c(0, 5, 10), c(0, 5, 10))
+mtext('firing rate (Hz)', 4, 2, adj=0)
+mtext(paste(cell,'-es sejt, felfele'),3,2)
+
+image(x.mids, 1:42, s.smoothed.down[cell,,] / act.runs.down[121,,], col=topo.colors(24), xlab='x position (m)', ylab='trial', main='', ylim=c(0, 42))
+lines(x.mids, ratemaps.all.smth.down[,cell],col=heat.colors(3)[2], lwd=2)
+axis(4, c(0, 5, 10), c(0, 5, 10))
+mtext('firing rate (Hz)', 4, 2, adj=0)
+mtext(paste(cell,'-es sejt, lelfele'),3,2)
+```
+
+A következõkben hisztogrammon ábrázoltam az egyes fel és lefele futás korrelációértékekeit illetve véletlenszerûen párbarendezett fel és lefutásét. Ezt azért tesszük meg, hogy kiderítsük, hogy tényleg vannak e olyan sejtek amik az iránytól függetlenül ugyan azt a pozíciót kódolják vagy a véletlen mûve, hogy a két irányhoz ugyan az a place-field rendelõdött. 
+```{r, echo=FALSE, warning=FALSE}
+cov_m=rep(0,120)
+cells=c(1:120)
+for (cell in cells){
+  s.up=ratemaps.all.smth.up[,cell]
+  s.down=ratemaps.all.smth.down[,cell]
+  cov_m[cell]=round(cor(s.up,s.down),2)
+}
+
+cov_m_sf=rep(0,120)
+cov_m_sf_matrix=array(0,dim = c(120,1000))
+#set.seed(001) #to make reproducible
+for(k in c(1:1000)){
+  cell.shuffled=sample(1:120)
+  cell=0
+  for (cell_sf in cell.shuffled){
+    cell=cell+1
+    if(cell_sf==cell){if(cell.shuffled==1){cell.shuffled=20}else{cell.shuffled=cell.shuffled-1}}
+    s.up=ratemaps.all.smth.up[,cell]
+    s.down=ratemaps.all.smth.down[,cell_sf]
+    cov_m_sf[cell]=round(cor(s.up,s.down),2)
+   }
+  cov_m_sf_matrix[,k]=cov_m_sf
+}
+# cov_m_sf_matrix_neg=cov_m_sf_matrix
+# cov_m_sf_matrix_neg[cov_m_sf_matrix_neg>0]<-NA
+# cov_m_sf_matrix_neg_mean=rowMeans(cov_m_sf_matrix_neg,na.rm = TRUE)
+# cov_m_sf_matrix_poz=cov_m_sf_matrix
+# cov_m_sf_matrix_poz[cov_m_sf_matrix_poz<=0]<-NA
+# cov_m_sf_matrix_poz_mean=rowMeans(cov_m_sf_matrix_poz,na.rm = TRUE)
+# 
+# cov_m_sf_mean=rowMeans(cov_m_sf_matrix)
+# # hist(cov_m, col=rgb(0,0,1,1/4),breaks = 20,ylim = c(0,30),main = '')
+# hist(cov_m_sf_matrix_neg_mean, add=T, col=rgb(1,0,1,1/4),breaks = 5 )
+# hist(cov_m_sf_matrix_poz_mean, add=T, col=rgb(1,0,1,1/4),breaks = 10 )
+# legend('topright', legend=c('experiement','mean of 80 random sample'),col=c(rgb(0,0,1,1/4),rgb(1,0,1,1/4)),pch=16, cex=0.9, pt.bg = 'blue')
+```
+
+```{r, warning=FALSE}
+cov_m=rep(0,120)
+cells=c(1:120)
+for (cell in cells){
+  s.up=ratemaps.all.smth.up[,cell]
+  s.down=ratemaps.all.smth.down[,cell]
+  cov_m[cell]=round(cor(s.up,s.down),2)
+}
+
+cov_m_sf=rep(0,120)
+#set.seed(001) #to make reproducible
+cell.shuffled=sample(1:120)
+cell=0
+for (cell_sf in cell.shuffled){
+  cell=cell+1
+  if(cell_sf==cell){break}
+  s.up=ratemaps.all.smth.up[,cell]
+  s.down=ratemaps.all.smth.down[,cell_sf]
+  cov_m_sf[cell]=round(cor(s.up,s.down),2)
+ }
+
+hist(cov_m, col=rgb(0,0,1,1/4), main = 'compare with one random sample',breaks = 10)
+hist(cov_m_sf, add=T, col=rgb(1,0,1,1/4),breaks = 10 )
+legend('topright', legend=c('experiement','random sample'),col=c(rgb(0,0,1,1/4),rgb(1,0,1,1/4)),pch=16, cex=0.9)
+```
+Az összehasonlítást sokszor elvégezve, mindig más véletlen párosításra az eredmények is nagyon diverzek, van ami erõtelejesen hasonlít a mérésre van ami egyáltalán nem, stb. 
+Az ábrák alapján nem egyértelmû a kérdésre a válasz. Ha tényleg lennének sejtek melyeknek irányfüggetlen a place-field-jük akkor nagyjából 0.8 feletti korrelációértéket sokkal nagyobb gyakorisággal kellene kapjunk a valódi mérésbõl számolva, mint a random mintavételezésbõl. Ez az ábrákon nem látszik egyértelmûen.
+Ahhoz, hogy eldönthessük a mérés eloszlása és a véletlen párosításokból kapott eloszlások jobb csücske, tehát a 0.8 feletti értékekre szignifikánsan eltér e, bootstrap analízist alkalmazunk.
+A mérés adataiból 1000 véletlenszerû párosítást (mintavételezést) csinálok és kiszámolom, hogy az 1000 mintavételezésbõl hány esetben lesz 0.8 vagy a feletti korrelációval legalább 10 elem, mivel a mérésben 10 elemnek van legalább ekkora korrelációja.
+
+0.8-as korrelációérték felett azt mondhatjuk, hogy a sejt irányfüggetlen.  
+```{r}
+paste('mérésben lévõ legalább 0.8-as korrelációjú elemek száma:',round(round(sum(cov_m>=0.8,na.rm = T)/120,2)*120),'db')
+summ=numeric(1000)
+for(i in c(1:dim(cov_m_sf_matrix)[2])){
+  summ[i]=sum(cov_m_sf_matrix[,i]>=0.8,na.rm=T)/120
+}
+paste('mintavételezésben lévõ legalább 0.8-as korrelációjú elemek száma hányszor éri el a 10-et:',length(summ[summ*100>=8.3]))
+
+```
+A számolások szerint az 1000 mintavételbõl összesen a 3 db esetben nagyobb vagy egyenlõ 10-el a legalább 0.8-as korrelációértékû párosítás. Ezek alapján 3/1000=0.003 a P értékünk, 0.01-os 
+szignifikancia szint mellett az nullhipotézist elvetjük, tehát a mérés és a mintavételezés között szignifikáns különbség van 0.8 felett. 
+
+
+Alábbiakban megjelenítettem egyesével a véletlen mintavételezések kovarianciájának kommulatív eloszlásfüggvényét illetve a mérését, hogy lássuk, hol válik el egymástól láthatóan a két eloszlás.
+```{r}
+plot(ecdf(cov_m))
+for(i in c(1:dim(cov_m_sf_matrix)[2])){
+plot(ecdf(cov_m_sf_matrix[,i]),col=3,add=T)
+}
+plot(ecdf(cov_m),add=T)
+legend('topleft', legend =c('experiement', 'samples'),col = c(1,3),pch=16)
+```
+
+
+Kiváncsiságból megnéztem a peak alapján sorbarendezett sejteket a lefele futásra, itt jobban látszik a hasonlóság a felfele futással mint kulon kulon sejtekre megnezve.
+```{r, echo=FALSE,fig.height=6, fig.width=8}
+par(mfcol=c(1,2));par(mar=c(4,4,4,4))
+i.cells.active <- which(apply(ratemaps.all, 2, max) > 5)
+N.cells.active <- length(i.cells.active)
+ratemaps <- ratemaps.all[,i.cells.active]
+ii.maxs <- apply(ratemaps, 2, which.max)
+sort.peaks <- sort(ii.maxs, ind=T)$ix
+image(x.mids, 1:N.cells.active, ratemaps[,sort.peaks], col=topo.colors(24), xlab='x position (m)', ylab='cell')
+mtext('uprun')
+
+i.cells.active <- which(apply(ratemaps.all.down, 2, max) > 5)
+N.cells.active <- length(i.cells.active)
+ratemaps.down <- ratemaps.all.down[,i.cells.active]
+ii.maxs <- apply(ratemaps.down, 2, which.max)
+sort.peaks <- sort(ii.maxs, ind=T)$ix
+image(x.mids, 1:N.cells.active, ratemaps.down[,sort.peaks], col=topo.colors(24), xlab='x position (m)', ylab='cell')
+mtext('downrun')
+
+```
